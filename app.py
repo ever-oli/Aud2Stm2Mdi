@@ -5,10 +5,16 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-import shutil
-from validators import AudioValidator
-from demucs_handler import DemucsProcessor
-from basic_pitch_handler import BasicPitchConverter
+import soundfile as sf
+
+# Non-interactive Matplotlib backend — must be set before pyplot is imported
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+
+import pretty_midi
+import gradio as gr
 
 # ── Environment variables ────────────────────────────────────────────────────
 # Suppress verbose TF / Metal logs
