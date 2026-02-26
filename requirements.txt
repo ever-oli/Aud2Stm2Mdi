@@ -1,6 +1,20 @@
-gradio>=4.0.0
-demucs>=4.0.0
-basic-pitch>=0.2.6
+# Core ML / audio
 torch>=2.0.0
 torchaudio>=2.0.0
-transformers>=4.30.0
+demucs>=4.0.0
+basic-pitch>=0.4.0
+
+# Gradio UI
+gradio>=4.0.0
+
+# Audio I/O & MIDI
+soundfile>=0.12.0
+numpy>=1.24.0
+pretty_midi>=0.2.10
+
+# Piano-roll visualisation
+matplotlib>=3.7.0
+
+# ── Apple Silicon (optional but recommended on M-series Macs) ──────────────
+# Uncomment to enable GPU acceleration for Basic Pitch's TFLite inference:
+# tensorflow-metal>=1.1.0
