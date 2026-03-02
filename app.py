@@ -13,6 +13,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
+import librosa
+import pyrubberband as pyrb
+
 import pretty_midi
 import gradio as gr
 
@@ -23,6 +26,9 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 # raising an error.  Must be set before torch is imported (which happens
 # inside demucs_handler).
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
+# torchaudio is imported inside the handlers; audio loading is done via
+# soundfile directly (TorchCodec is not available on Apple Silicon).
 
 logging.getLogger("tensorflow").setLevel(logging.ERROR)
 logging.basicConfig(level=logging.INFO)
@@ -148,6 +154,7 @@ def render_piano_roll(midi_path: str) -> np.ndarray:
 def process_audio(
     audio_file,
     stem_type: str,
+    target_bpm: float,
     convert_midi: bool,
     onset_threshold: float,
     frame_threshold: float,
@@ -159,7 +166,7 @@ def process_audio(
     Gradio Blocks handler.
 
     Inputs (must match the order in run_btn.click(inputs=[...])):
-        audio_file, stem_type, convert_midi,
+        audio_file, stem_type, target_bpm, convert_midi,
         onset_threshold, frame_threshold, min_note_length, multiple_pitch_bends
 
     Outputs  →  [stem_audio, midi_file, piano_roll]
@@ -196,11 +203,50 @@ def process_audio(
 
         progress(0.55, desc="Stem extracted.")
 
-        # Read stem back for Gradio audio preview (mono int16)
-        audio_data, file_sr = sf.read(str(stem_path))
-        if audio_data.ndim > 1:
-            audio_data = audio_data.mean(axis=1)
-        audio_out = (file_sr, (audio_data * 32767).astype(np.int16))
+        # Read stem back for processing and preview (mono int16)
+        y, orig_sr = librosa.load(str(stem_path), sr=None)
+        
+        # ── Polymath Integration: BPM Quantization ───────────────────────
+        # If Target BPM > 0, we time-stretch the audio to perfectly align 
+        # to that exact grid before MIDI conversion. This ensures the output
+        # MIDI notes lock onto the piano roll.
+        if target_bpm > 0:
+            progress(0.56, desc=f"Quantizing stem to {target_bpm} BPM…")
+            
+            # Extract harmonic/percussive and find beats
+            y_harmonic, y_percussive = librosa.effects.hpss(y)
+            tempo, beats = librosa.beat.beat_track(
+                sr=orig_sr, 
+                onset_envelope=librosa.onset.onset_strength(y=y_percussive, sr=orig_sr), 
+                trim=False
+            )
+            beat_frames = librosa.frames_to_samples(beats)
+            
+            # Generate target metronome map
+            fixed_beat_times = [i * 120 / target_bpm for i in range(len(beat_frames))]
+            fixed_beat_frames = librosa.time_to_samples(fixed_beat_times)
+            
+            # Construct time map for pyrubberband
+            time_map = list(zip(beat_frames, fixed_beat_frames))
+            
+            # Handle the ending clip length
+            if len(beat_frames) > 0 and len(y) > beat_frames[-1]:
+                orig_end_diff = len(y) - beat_frames[-1]
+                # tempo is an ndarray, so we extract the scalar float for math
+                tempo_val = tempo[0] if isinstance(tempo, np.ndarray) else tempo
+                new_ending = int(round(fixed_beat_frames[-1] + orig_end_diff * (tempo_val / target_bpm)))
+                time_map.append((len(y), new_ending))
+            
+            # Time-stretch
+            y = pyrb.timemap_stretch(y, orig_sr, time_map)
+            # Re-save the stretched stem to use for Basic Pitch
+            sf.write(str(stem_path), y, orig_sr)
+            progress(0.59, desc="Quantization complete.")
+
+        # Preview Audio formatting
+        if y.ndim > 1:
+            y = y.mean(axis=1)
+        audio_out = (orig_sr, (y * 32767).astype(np.int16))
 
         # ── Early exit if MIDI not requested ─────────────────────────────
         if not convert_midi:
@@ -234,6 +280,43 @@ def process_audio(
         raise gr.Error(str(exc)) from exc
 
 
+# ── Direct-path processing (used by Quick Test UI) ───────────────────────────
+def process_audio_path(
+    file_path: str,
+    stem_type: str,
+    target_bpm: float,
+    convert_midi: bool,
+    onset_threshold: float,
+    frame_threshold: float,
+    min_note_length: float,
+    multiple_pitch_bends: bool,
+    progress=gr.Progress(track_tqdm=True),
+):
+    """Same as process_audio but accepts a plain file-system path string."""
+
+    class _FakePath:
+        def __init__(self, p):
+            self.name = p
+
+    return process_audio(
+        _FakePath(file_path),
+        stem_type, target_bpm, convert_midi,
+        onset_threshold, frame_threshold, min_note_length, multiple_pitch_bends,
+        progress,
+    )
+
+
+# Discover any audio files in the repo's mp3/ folder for the Quick Test picker
+_MP3_DIR = Path(__file__).parent / "mp3"
+
+def get_test_files():
+    if not _MP3_DIR.is_dir():
+        return []
+    return sorted(
+        str(p) for p in _MP3_DIR.glob("*")
+        if p.suffix.lower() in (".mp3", ".wav", ".flac")
+    )
+
 # ── Gradio Blocks UI ──────────────────────────────────────────────────────────
 def build_interface() -> gr.Blocks:
     with gr.Blocks(
@@ -263,6 +346,13 @@ def build_interface() -> gr.Blocks:
                 )
                 midi_cb = gr.Checkbox(label="Convert to MIDI", value=True)
 
+                with gr.Accordion("BPM Quantization (Polymath Core)", open=False):
+                    bpm_sl = gr.Slider(
+                        0, 200, value=0, step=1,
+                        label="Target BPM",
+                        info="Time-stretches the stem so MIDI falls perfectly on the beat grid. Set to 0 to disable."
+                    )
+
                 with gr.Accordion("MIDI Parameters", open=False):
                     onset_sl = gr.Slider(
                         0.10, 0.95, value=0.50, step=0.05,
@@ -285,7 +375,20 @@ def build_interface() -> gr.Blocks:
                         info="Keep OFF for cleaner Ableton import",
                     )
 
-                run_btn = gr.Button("Process", variant="primary", size="lg")
+                run_btn = gr.Button("Process", variant="primary", size="lg", elem_id="run_btn")
+
+                test_files = get_test_files()
+                with gr.Accordion("🧪 Quick Test (pre-loaded files)", open=bool(test_files), elem_id="quick_test", visible=bool(test_files)):
+                    test_dd = gr.Dropdown(
+                        choices=test_files if test_files else ["No files found"],
+                        value=test_files[0] if test_files else None,
+                        label="Select test file",
+                        elem_id="test_file_dd",
+                    )
+                    test_btn = gr.Button(
+                        "Run Quick Test", variant="secondary", size="sm",
+                        elem_id="test_btn",
+                    )
 
             # ── Right column: results ─────────────────────────────────────
             with gr.Column(scale=2):
@@ -300,7 +403,16 @@ def build_interface() -> gr.Blocks:
         run_btn.click(
             fn=process_audio,
             inputs=[
-                audio_input, stem_dd, midi_cb,
+                audio_input, stem_dd, bpm_sl, midi_cb,
+                onset_sl, frame_sl, minlen_sl, bends_cb,
+            ],
+            outputs=[stem_audio, midi_file, piano_roll],
+        )
+
+        test_btn.click(
+            fn=process_audio_path,
+            inputs=[
+                test_dd, stem_dd, bpm_sl, midi_cb,
                 onset_sl, frame_sl, minlen_sl, bends_cb,
             ],
             outputs=[stem_audio, midi_file, piano_roll],
@@ -322,4 +434,5 @@ if __name__ == "__main__":
         server_name="0.0.0.0",
         server_port=7860,
         share=False,
+        allowed_paths=[str(OUTPUT_DIR)],
     )

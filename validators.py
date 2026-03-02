@@ -1,6 +1,6 @@
 import os
 import logging
-import torchaudio
+import soundfile as sf
 from typing import Tuple
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,8 @@ class AudioValidator:
                 )
 
             try:
-                _, sample_rate = torchaudio.load(file_path)
+                info = sf.info(file_path)
+                sample_rate = info.samplerate
                 # Only reject extremely low sample rates; high-res (96 kHz, 192 kHz)
                 # is fine — Demucs resamples internally.
                 if sample_rate < 8000:

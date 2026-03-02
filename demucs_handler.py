@@ -1,6 +1,8 @@
 import torch
 import torchaudio
 import logging
+import numpy as np
+import soundfile as sf
 from pathlib import Path
 from demucs.pretrained import get_model
 from demucs.apply import apply_model
@@ -43,8 +45,17 @@ class DemucsProcessor:
         sources : Tensor  shape (1, n_stems, 2, time)  at model.samplerate
         sample_rate : int  the model's native sample rate (44 100 Hz for htdemucs)
         """
-        waveform, _ = torchaudio.load(audio_path)
-        print(f"[Demucs] loaded  shape={waveform.shape}")
+        # Use soundfile to load audio — avoids the TorchCodec dependency that
+        # torchaudio.load() triggers on Apple Silicon with torchaudio >= 2.0.
+        audio_np, file_sr = sf.read(audio_path, always_2d=True)  # (samples, channels)
+        audio_np = audio_np.T.astype(np.float32)                  # (channels, samples)
+        waveform = torch.from_numpy(audio_np)
+
+        # Resample to model's native sample rate if necessary
+        if file_sr != self.model.samplerate:
+            waveform = torchaudio.functional.resample(waveform, file_sr, self.model.samplerate)
+
+        print(f"[Demucs] loaded  shape={waveform.shape}  sr={file_sr}->{self.model.samplerate}")
 
         # Ensure 2-D (channels, time)
         if waveform.dim() == 1:
@@ -75,6 +86,11 @@ class DemucsProcessor:
     ) -> Path:
         """Save *stem* (shape: 2, time) as a WAV at the model's sample rate."""
         out = Path(output_dir) / f"{stem_name}.wav"
-        torchaudio.save(str(out), stem.cpu(), self.model.samplerate)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        # Use soundfile to save — avoids the TorchCodec dependency in
+        # torchaudio.save() on Apple Silicon with torchaudio >= 2.0.
+        # stem shape: (2, time) — soundfile expects (time, channels).
+        audio_np = stem.cpu().numpy().T.astype("float32")
+        sf.write(str(out), audio_np, self.model.samplerate)
         print(f"[Demucs] stem saved → {out}")
         return out
