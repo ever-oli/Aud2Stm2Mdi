@@ -2,7 +2,7 @@
 torch>=2.0.0
 torchaudio>=2.0.0
 demucs>=4.0.0
-basic-pitch>=0.4.0
+basic-pitch @ git+https://github.com/spotify/basic-pitch.git
 
 # Gradio UI
 gradio>=4.0.0
