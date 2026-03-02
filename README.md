@@ -1,3 +1,15 @@
+---
+title: Aud2Stm2Mdi
+emoji: "🎵"
+colorFrom: blue
+colorTo: green
+sdk: gradio
+sdk_version: 4.0.0
+python_version: 3.10
+app_file: app.py
+pinned: false
+---
+
 # Audio Processing Pipeline: Stem Separation and MIDI Conversion
 
 ## Project Overview
@@ -140,7 +152,6 @@ Implemented comprehensive error handling for:
 
 ## Closing Note
 This implementation is currently running successfully on Lightning.ai, providing reliable audio stem separation and MIDI conversion capabilities through an intuitive web interface.
-
 
 
 
