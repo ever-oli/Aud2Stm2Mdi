@@ -6,6 +6,7 @@ basic-pitch>=0.4.0
 
 # Gradio UI
 gradio>=4.0.0
+pillow>=10.4.0
 
 # Audio I/O & MIDI
 soundfile>=0.12.0
