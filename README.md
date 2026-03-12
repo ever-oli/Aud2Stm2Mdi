@@ -10,10 +10,20 @@ app_file: app.py
 pinned: false
 ---
 
-# Audio Processing Pipeline: Stem Separation and MIDI Conversion
+# Multi-Model Stem Separation and MIDI Transcription
 
 ## Project Overview
-A production-ready web application that separates audio stems and converts them to MIDI using state-of-the-art deep learning models. Built with Gradio and deployed on LightningAI, this pipeline now supports multiple separator backends plus selectable AMT backends (`Basic Pitch`, `MT3`) in the same UI.
+A production-ready web application for testing different stem-separation models against different audio-to-MIDI transcription models. Built with Gradio and deployed on LightningAI, the app now supports multiple separator families plus selectable AMT backends in the same UI.
+
+## Supported Model Matrix
+
+### Separator Models
+- Demucs family: `htdemucs`, `htdemucs_ft`, `htdemucs_6s`, `hdemucs_mmi`, `mdx`, `mdx_extra`, `mdx_q`, `mdx_extra_q`
+- ZFTurbo-backed MSST family: `msst_bs_roformer`, `msst_scnet`, `msst_mdx23c`
+
+### Transcription Models
+- `basic_pitch`
+- `mt3`
 
 ## Technical Requirements
 
@@ -43,8 +53,10 @@ project/
 ├── app.py                 # Main Gradio interface and processing logic
 ├── amt_backends.py        # AMT backend adapters (Basic Pitch, MT3)
 ├── amt_registry.py        # AMT model registry
-├── demucs_handler.py      # Audio stem separation handler
+├── demucs_handler.py      # Demucs inference wrapper
 ├── demucs_models.py       # Official Demucs checkpoint registry
+├── separator_backends.py  # Separator backend adapters (Demucs, MSST)
+├── separator_registry.py  # Separator model registry
 ├── basic_pitch_handler.py # MIDI conversion handler
 ├── requirements-amt-backends.txt         # Optional MT3 runtime deps
 ├── requirements-separation-backends.txt  # Optional non-Demucs backend deps
@@ -55,13 +67,20 @@ project/
 ## Implementation Details
 
 ### demucs_handler.py
-Handles audio stem separation using official Demucs checkpoints:
+Handles Demucs-family separation using official Demucs checkpoints:
 - Supports mono and stereo input
 - Automatic stereo conversion for mono inputs
 - Supports multiple Demucs model variants (`htdemucs`, `htdemucs_ft`, `htdemucs_6s`, `hdemucs_mmi`, `mdx`, `mdx_extra`, `mdx_q`, `mdx_extra_q`)
 - Efficient tensor processing with PyTorch
 - Proper error handling and logging
 - Progress tracking during processing
+
+### separator_backends.py / separator_registry.py
+Manages the full separator model matrix used by the app:
+- Demucs-family models
+- ZFTurbo-backed MSST models (`msst_bs_roformer`, `msst_scnet`, `msst_mdx23c`)
+- Shared separator contract for app and sweep scripts
+- Per-model stem lists so both 4-stem and 6-stem outputs work cleanly
 
 ### amt_backends.py
 Manages MIDI conversion using pluggable transcription backends:
@@ -89,7 +108,8 @@ Provides comprehensive audio file validation:
 Main application interface featuring:
 - Clean, intuitive Gradio UI
 - Multi-file upload support
-- Stem type selection (vocals, drums, bass, other)
+- Separator model selection
+- Per-model stem selection
 - Optional MIDI conversion with selectable AMT backend
 - Persistent file handling
 - Progress tracking
@@ -98,7 +118,8 @@ Main application interface featuring:
 ## Key Features
 
 ### Audio Processing
-- High-quality stem separation using Demucs
+- High-quality stem separation across multiple model families
+- Demucs-family separators plus ZFTurbo-backed RoFormer / SCNet / MDX23C
 - Per-model stem selection in the Gradio UI
 - Support for multiple audio formats
 - Automatic audio format conversion
@@ -106,16 +127,12 @@ Main application interface featuring:
 - Progress tracking during processing
 
 ### MIDI Conversion
-- Multiple transcription backends:
-  - Basic Pitch
-  - MT3
+- Multiple transcription backends
+- Basic Pitch
+- MT3
 - Accurate note detection
 - Polyphonic transcription
-- Configurable Basic Pitch parameters:
-  - Note duration threshold
-  - Frequency range
-  - Onset detection sensitivity
-  - Frame-level pitch activation
+- Configurable Basic Pitch parameters for thresholding and note cleanup
 
 ### User Interface
 - Simple, intuitive design
@@ -143,31 +160,35 @@ pip install -r requirements-amt-backends.txt
 python app.py
 ```
 
-The optional separator backend requirements enable the RoFormer, SCNet, MDX23C, and quantized MDX integrations exposed in the app. The optional AMT backend requirement enables MT3 in the main MIDI transcription flow.
+The optional separator backend requirements enable the ZFTurbo-backed RoFormer, SCNet, and MDX23C integrations used alongside the Demucs family in the app and sweep scripts. The optional AMT backend requirements enable MT3 so the transcription side can be compared against Basic Pitch.
 
 ### Compare Demucs Models
 ```bash
 python scripts/run_demucs_model_sweep.py path/to/audio.wav --models all
 ```
 
-This writes model-specific stem folders plus a `summary.json` file under `demucs_sweeps/<audio-name>/`.
+This is the Demucs-family-only sweep. It writes model-specific stem folders plus a `summary.json` file under `demucs_sweeps/<audio-name>/`.
 
 ### Compare Separator Models
 ```bash
 python scripts/run_separator_model_sweep.py path/to/audio.wav --models all
 ```
 
+This runs the full separator registry across Demucs plus the ZFTurbo-backed RoFormer / SCNet / MDX23C entries.
+
 ### Compare AMT Models
 ```bash
 python scripts/run_amt_model_sweep.py path/to/audio.wav --models all
 ```
+
+This compares the registered AMT backends directly without first running stem separation.
 
 ### Compare Full Separation -> MIDI Pipeline
 ```bash
 python scripts/run_full_pipeline_sweep.py path/to/audio.wav --separator-models all --amt-models all --stems all
 ```
 
-This runs every registered separator model, transcribes every produced stem with every AMT backend, and writes a single `summary.json` plus model-specific outputs under `pipeline_sweeps/<audio-name>/`.
+This is the main end-to-end matrix run. It executes every registered separator model, transcribes every produced stem with every AMT backend, and writes a single `summary.json` plus model-specific outputs under `pipeline_sweeps/<audio-name>/`.
 
 ### Lightning.ai Deployment
 1. Create new Lightning App
