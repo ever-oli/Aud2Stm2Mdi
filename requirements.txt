@@ -4,6 +4,16 @@ torchaudio>=2.0.0
 demucs>=4.0.0
 basic-pitch @ git+https://github.com/spotify/basic-pitch.git
 
+# Optional experimental separator backends live in:
+# requirements-separation-backends.txt
+# Install them with:
+# pip install -r requirements.txt -r requirements-separation-backends.txt
+#
+# Optional AMT backends live in:
+# requirements-amt-backends.txt
+# Install them with:
+# pip install -r requirements.txt -r requirements-amt-backends.txt
+
 # Gradio UI
 gradio>=4.0.0
 pillow>=10.4.0
@@ -11,6 +21,8 @@ pillow>=10.4.0
 # Audio I/O & MIDI
 soundfile>=0.12.0
 numpy>=1.24.0
+librosa>=0.10.0
+pyrubberband>=0.3.0
 pretty_midi>=0.2.10
 
 # Piano-roll visualisation

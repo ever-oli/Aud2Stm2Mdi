@@ -8,11 +8,14 @@ from demucs.pretrained import get_model
 from demucs.apply import apply_model
 from typing import Tuple
 
+from demucs_models import DEFAULT_DEMUCS_MODEL, get_demucs_model_spec
+
 logger = logging.getLogger(__name__)
 
 
 class DemucsProcessor:
-    def __init__(self, model_name: str = "htdemucs"):
+    def __init__(self, model_name: str = DEFAULT_DEMUCS_MODEL):
+        self.model_name = get_demucs_model_spec(model_name).name
         # Device priority: CUDA → Apple MPS → CPU
         # PYTORCH_ENABLE_MPS_FALLBACK=1 must be set before torch import so that
         # any MPS-unsupported ops automatically fall back to CPU instead of crashing.
@@ -25,12 +28,13 @@ class DemucsProcessor:
 
         print(f"[Demucs] device: {self.device}")
 
-        self.model = get_model(model_name)
+        self.model = get_model(self.model_name)
         self.model.to(self.device)
         self.model.eval()
+        self.sources = tuple(self.model.sources)
 
         print(
-            f"[Demucs] model '{model_name}' ready  "
+            f"[Demucs] model '{self.model_name}' ready  "
             f"| sources: {self.model.sources}  "
             f"| native sr: {self.model.samplerate} Hz"
         )
@@ -94,3 +98,10 @@ class DemucsProcessor:
         sf.write(str(out), audio_np, self.model.samplerate)
         print(f"[Demucs] stem saved → {out}")
         return out
+
+    def separate_to_dir(self, audio_path: str, output_dir: str) -> dict[str, Path]:
+        sources, _ = self.separate_stems(audio_path)
+        stem_paths: dict[str, Path] = {}
+        for index, stem_name in enumerate(self.sources):
+            stem_paths[stem_name] = self.save_stem(sources[0, index], stem_name, output_dir)
+        return stem_paths

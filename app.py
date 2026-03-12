@@ -1,11 +1,48 @@
 import os
 import uuid
 import logging
+import tempfile
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import soundfile as sf
+
+# Keep caches and temporary compilation artifacts in writable paths so the app
+# works reliably in sandboxes and hosted runtimes.
+RUNTIME_ROOT = Path(os.environ.get("AUD2STM2MDI_RUNTIME_ROOT", "/tmp/audio_processor"))
+RUNTIME_ENV_DIR = RUNTIME_ROOT / ".runtime"
+RUNTIME_CACHE_DIR = RUNTIME_ENV_DIR / "cache"
+RUNTIME_MPLCONFIG_DIR = RUNTIME_ENV_DIR / "mplconfig"
+RUNTIME_TMP_DIR = RUNTIME_ENV_DIR / "tmp"
+RUNTIME_TORCH_HOME = RUNTIME_CACHE_DIR / "torch"
+
+for runtime_dir in (
+    RUNTIME_ROOT,
+    RUNTIME_ENV_DIR,
+    RUNTIME_CACHE_DIR,
+    RUNTIME_MPLCONFIG_DIR,
+    RUNTIME_TMP_DIR,
+    RUNTIME_TORCH_HOME,
+):
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _configure_runtime_path(var_name: str, fallback: Path, *, force: bool = False) -> Path:
+    current = os.environ.get(var_name)
+    current_path = Path(current) if current else None
+    if force or current_path is None or not current_path.exists() or not os.access(current_path, os.W_OK):
+        os.environ[var_name] = str(fallback)
+        return fallback
+    return current_path
+
+
+RUNTIME_CACHE_DIR = _configure_runtime_path("XDG_CACHE_HOME", RUNTIME_CACHE_DIR)
+RUNTIME_MPLCONFIG_DIR = _configure_runtime_path("MPLCONFIGDIR", RUNTIME_MPLCONFIG_DIR)
+RUNTIME_TMP_DIR = _configure_runtime_path("TMPDIR", RUNTIME_TMP_DIR, force=True)
+RUNTIME_TORCH_HOME = _configure_runtime_path("TORCH_HOME", RUNTIME_CACHE_DIR / "torch")
+RUNTIME_TORCH_HOME.mkdir(parents=True, exist_ok=True)
+tempfile.tempdir = str(RUNTIME_TMP_DIR)
 
 # Non-interactive Matplotlib backend — must be set before pyplot is imported
 import matplotlib
@@ -35,30 +72,59 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 from validators import AudioValidator          # noqa: E402
-from demucs_handler import DemucsProcessor    # noqa: E402
-from basic_pitch_handler import BasicPitchConverter  # noqa: E402
+from separator_backends import create_separator_processor  # noqa: E402
+from separator_registry import (  # noqa: E402
+    DEFAULT_SEPARATOR_MODEL,
+    get_default_stem_for_model,
+    get_separator_model_sources,
+    get_separator_model_spec,
+    list_separator_dropdown_choices,
+)
+from amt_backends import create_amt_processor  # noqa: E402
+from amt_registry import (  # noqa: E402
+    DEFAULT_AMT_MODEL,
+    get_amt_model_help_text,
+    get_amt_model_spec,
+    list_amt_dropdown_choices,
+)
 
 # ── Output directory ─────────────────────────────────────────────────────────
-OUTPUT_DIR = Path("/tmp/audio_processor")
+OUTPUT_DIR = RUNTIME_ROOT
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── Singleton model instances (loaded once, reused across requests) ──────────
-_processor: Optional[DemucsProcessor] = None
-_converter: Optional[BasicPitchConverter] = None
+_processors: dict[str, object] = {}
+_amt_processors: dict[str, object] = {}
 
 
-def get_processor() -> DemucsProcessor:
-    global _processor
-    if _processor is None:
-        _processor = DemucsProcessor()
-    return _processor
+def get_processor(model_name: str = DEFAULT_SEPARATOR_MODEL):
+    processor = _processors.get(model_name)
+    if processor is None:
+        processor = create_separator_processor(model_name)
+        _processors[model_name] = processor
+    return processor
 
 
-def get_converter() -> BasicPitchConverter:
-    global _converter
-    if _converter is None:
-        _converter = BasicPitchConverter()
-    return _converter
+def get_amt_processor(model_name: str = DEFAULT_AMT_MODEL):
+    processor = _amt_processors.get(model_name)
+    if processor is None:
+        processor = create_amt_processor(model_name)
+        _amt_processors[model_name] = processor
+    return processor
+
+
+def get_stem_choices(model_name: str) -> tuple[list[str], str]:
+    stems = get_separator_model_sources(model_name)
+    return stems, get_default_stem_for_model(model_name)
+
+
+def update_stem_dropdown(model_name: str):
+    stems, default_stem = get_stem_choices(model_name)
+    return gr.update(choices=stems, value=default_stem)
+
+
+def update_amt_help_text(model_name: str):
+    return gr.update(value=get_amt_model_help_text(model_name))
 
 
 # ── Piano roll renderer ───────────────────────────────────────────────────────
@@ -160,6 +226,8 @@ def process_audio(
     frame_threshold: float,
     min_note_length: float,
     multiple_pitch_bends: bool,
+    separator_model: str = DEFAULT_SEPARATOR_MODEL,
+    amt_model: str = DEFAULT_AMT_MODEL,
     progress=gr.Progress(track_tqdm=True),
 ):
     """
@@ -167,7 +235,8 @@ def process_audio(
 
     Inputs (must match the order in run_btn.click(inputs=[...])):
         audio_file, stem_type, target_bpm, convert_midi,
-        onset_threshold, frame_threshold, min_note_length, multiple_pitch_bends
+        onset_threshold, frame_threshold, min_note_length,
+        multiple_pitch_bends, separator_model, amt_model
 
     Outputs  →  [stem_audio, midi_file, piano_roll]
     """
@@ -188,18 +257,20 @@ def process_audio(
 
     try:
         # ── Stage 1: stem separation ──────────────────────────────────────
-        progress(0.05, desc="Loading Demucs model…")
-        processor = get_processor()
+        spec = get_separator_model_spec(separator_model)
+        progress(0.05, desc=f"Loading separator '{spec.display_name}'…")
+        processor = get_processor(separator_model)
 
         progress(0.10, desc="Separating stems (this takes ~30-90 s on first run)…")
-        sources, sr = processor.separate_stems(file_path)
+        stem_paths = processor.separate_to_dir(file_path, str(work_dir))
 
-        # Use model.sources for robust stem index lookup
-        stem_index    = processor.model.sources.index(stem_type)
-        selected_stem = sources[0, stem_index]  # shape: (2, time)
-
-        processor.save_stem(selected_stem, stem_type, str(work_dir))
-        stem_path = work_dir / f"{stem_type}.wav"
+        if stem_type not in stem_paths:
+            available = ", ".join(processor.sources)
+            raise gr.Error(
+                f"Stem '{stem_type}' is not available for separator '{spec.display_name}'. "
+                f"Available stems: {available}"
+            )
+        stem_path = Path(stem_paths[stem_type])
 
         progress(0.55, desc="Stem extracted.")
 
@@ -254,17 +325,19 @@ def process_audio(
             return audio_out, None, gr.update(value=None, visible=False)
 
         # ── Stage 2: MIDI conversion ──────────────────────────────────────
-        progress(0.60, desc="Running Basic Pitch (TFLite inference)…")
-        converter = get_converter()
-        converter.set_process_options(
+        amt_spec = get_amt_model_spec(amt_model)
+        progress(0.60, desc=f"Running {amt_spec.display_name}…")
+        amt_processor = get_amt_processor(amt_model)
+
+        midi_path = work_dir / f"{stem_type}_{amt_model}.mid"
+        amt_processor.convert_to_midi(
+            str(stem_path),
+            str(midi_path),
             onset_threshold=onset_threshold,
             frame_threshold=frame_threshold,
             minimum_note_length=min_note_length,
             multiple_pitch_bends=multiple_pitch_bends,
         )
-
-        midi_path = work_dir / f"{stem_type}.mid"
-        converter.convert_to_midi(str(stem_path), str(midi_path))
 
         # ── Stage 3: piano roll render ────────────────────────────────────
         progress(0.90, desc="Rendering piano roll…")
@@ -290,6 +363,8 @@ def process_audio_path(
     frame_threshold: float,
     min_note_length: float,
     multiple_pitch_bends: bool,
+    separator_model: str = DEFAULT_SEPARATOR_MODEL,
+    amt_model: str = DEFAULT_AMT_MODEL,
     progress=gr.Progress(track_tqdm=True),
 ):
     """Same as process_audio but accepts a plain file-system path string."""
@@ -302,6 +377,8 @@ def process_audio_path(
         _FakePath(file_path),
         stem_type, target_bpm, convert_midi,
         onset_threshold, frame_threshold, min_note_length, multiple_pitch_bends,
+        separator_model,
+        amt_model,
         progress,
     )
 
@@ -319,6 +396,11 @@ def get_test_files():
 
 # ── Gradio Blocks UI ──────────────────────────────────────────────────────────
 def build_interface() -> gr.Blocks:
+    default_stem_choices, default_stem = get_stem_choices(DEFAULT_SEPARATOR_MODEL)
+    model_choices = list_separator_dropdown_choices()
+    amt_model_choices = list_amt_dropdown_choices()
+    default_amt_help = get_amt_model_help_text(DEFAULT_AMT_MODEL)
+
     with gr.Blocks(
         title="Aud2Stm2Mdi",
         theme=gr.themes.Base(primary_hue="indigo", neutral_hue="slate"),
@@ -326,8 +408,9 @@ def build_interface() -> gr.Blocks:
 
         gr.Markdown(
             "## Aud2Stm2Mdi\n"
-            "Separate audio into stems with **Demucs** `htdemucs`, "
-            "then transcribe to **MIDI** with **Basic Pitch**."
+            "Separate audio into stems with **Demucs** plus experimental "
+            "**RoFormer / SCNet / MDX23C** backends, "
+            "then transcribe to **MIDI** with **Basic Pitch** or **MT3**."
         )
 
         with gr.Row():
@@ -339,12 +422,25 @@ def build_interface() -> gr.Blocks:
                     label="Audio File  (.mp3 / .wav / .flac)",
                     file_types=[".mp3", ".wav", ".flac"],
                 )
+                model_dd = gr.Dropdown(
+                    choices=model_choices,
+                    value=DEFAULT_SEPARATOR_MODEL,
+                    label="Separator model",
+                    info="Demucs checkpoints plus selected MSST RoFormer / SCNet / MDX23C models.",
+                )
                 stem_dd = gr.Dropdown(
-                    choices=["vocals", "drums", "bass", "other"],
-                    value="vocals",
+                    choices=default_stem_choices,
+                    value=default_stem,
                     label="Stem to extract",
                 )
                 midi_cb = gr.Checkbox(label="Convert to MIDI", value=True)
+                amt_model_dd = gr.Dropdown(
+                    choices=amt_model_choices,
+                    value=DEFAULT_AMT_MODEL,
+                    label="MIDI transcription model",
+                    info="Basic Pitch is lightweight. MT3 is heavier but better suited to multi-instrument transcription.",
+                )
+                amt_help = gr.Markdown(default_amt_help)
 
                 with gr.Accordion("BPM Quantization (Polymath Core)", open=False):
                     bpm_sl = gr.Slider(
@@ -353,7 +449,7 @@ def build_interface() -> gr.Blocks:
                         info="Time-stretches the stem so MIDI falls perfectly on the beat grid. Set to 0 to disable."
                     )
 
-                with gr.Accordion("MIDI Parameters", open=False):
+                with gr.Accordion("Basic Pitch Parameters", open=False):
                     onset_sl = gr.Slider(
                         0.10, 0.95, value=0.50, step=0.05,
                         label="Onset Threshold",
@@ -405,6 +501,8 @@ def build_interface() -> gr.Blocks:
             inputs=[
                 audio_input, stem_dd, bpm_sl, midi_cb,
                 onset_sl, frame_sl, minlen_sl, bends_cb,
+                model_dd,
+                amt_model_dd,
             ],
             outputs=[stem_audio, midi_file, piano_roll],
         )
@@ -414,20 +512,34 @@ def build_interface() -> gr.Blocks:
             inputs=[
                 test_dd, stem_dd, bpm_sl, midi_cb,
                 onset_sl, frame_sl, minlen_sl, bends_cb,
+                model_dd,
+                amt_model_dd,
             ],
             outputs=[stem_audio, midi_file, piano_roll],
+        )
+
+        model_dd.change(
+            fn=update_stem_dropdown,
+            inputs=[model_dd],
+            outputs=[stem_dd],
+        )
+
+        amt_model_dd.change(
+            fn=update_amt_help_text,
+            inputs=[amt_model_dd],
+            outputs=[amt_help],
         )
 
     return demo
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+    # ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Load both models eagerly at startup so the first request doesn't pay
-    # the full model-load penalty.
+    # Load the default separator and MIDI model eagerly so the first request
+    # doesn't pay the full model-load penalty.
     print("Loading models at startup…")
-    get_processor()
-    get_converter()
+    get_processor(DEFAULT_SEPARATOR_MODEL)
+    get_amt_processor(DEFAULT_AMT_MODEL)
     print("Models ready — launching server.")
 
     build_interface().launch(
