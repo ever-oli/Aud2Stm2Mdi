@@ -24,6 +24,8 @@ A production-ready web application for testing different stem-separation models 
 ### Transcription Models
 - `basic_pitch`
 - `mt3`
+- `mt3_pytorch`
+- `yourmt3`
 
 ## Technical Requirements
 
@@ -42,9 +44,14 @@ Optional AMT runtime for MT3:
 pip install -r requirements.txt -r requirements-amt-backends.txt
 ```
 
-Full install for all separator and AMT backends:
+Optional Song2Graph-style context backends for analysis, lyrics, and CLAP retrieval:
 ```bash
-pip install -r requirements.txt -r requirements-separation-backends.txt -r requirements-amt-backends.txt
+pip install -r requirements.txt -r requirements-context-backends.txt
+```
+
+Full install for all separator, AMT, and context backends:
+```bash
+pip install -r requirements.txt -r requirements-separation-backends.txt -r requirements-amt-backends.txt -r requirements-context-backends.txt
 ```
 
 ### File Structure
@@ -57,8 +64,13 @@ project/
 ├── demucs_models.py       # Official Demucs checkpoint registry
 ├── separator_backends.py  # Separator backend adapters (Demucs, MSST)
 ├── separator_registry.py  # Separator model registry
+├── music_analysis.py      # Optional tempo/key/section analysis
+├── lyrics_transcription.py # Optional lyrics transcription + alignment
+├── run_manifest.py        # Song2Graph-style run manifest writer
+├── clap_retrieval.py      # CLAP library indexing and search helpers
 ├── basic_pitch_handler.py # MIDI conversion handler
 ├── requirements-amt-backends.txt         # Optional MT3 runtime deps
+├── requirements-context-backends.txt     # Optional analysis / lyrics / retrieval deps
 ├── requirements-separation-backends.txt  # Optional non-Demucs backend deps
 ├── validators.py          # Audio file validation utilities
 └── requirements.txt
@@ -86,7 +98,15 @@ Manages the full separator model matrix used by the app:
 Manages MIDI conversion using pluggable transcription backends:
 - Spotify Basic Pitch for lightweight, tunable transcription
 - MT3 via `mt3-infer` for heavier multi-instrument transcription
+- MR-MT3, MT3-PyTorch, and YourMT3 variants through the same registry
 - Shared output contract for the Gradio app
+
+### music_analysis.py / lyrics_transcription.py / run_manifest.py
+Adds optional Song2Graph-style context extraction around every run:
+- Tempo / key / section analysis
+- Lyrics transcription with section alignment
+- JSON run manifests for app runs and sweep scripts
+- Retrieval-ready metadata for later CLAP indexing
 
 ### basic_pitch_handler.py
 Manages MIDI conversion using Spotify's Basic Pitch:
@@ -111,6 +131,9 @@ Main application interface featuring:
 - Separator model selection
 - Per-model stem selection
 - Optional MIDI conversion with selectable AMT backend
+- Optional tempo / key / section analysis
+- Optional lyrics transcription on the selected stem
+- Downloadable run manifest and lyrics JSON outputs
 - Persistent file handling
 - Progress tracking
 - Comprehensive error handling
@@ -121,6 +144,7 @@ Main application interface featuring:
 - High-quality stem separation across multiple model families
 - Demucs-family separators plus ZFTurbo-backed RoFormer / SCNet / MDX23C
 - Per-model stem selection in the Gradio UI
+- Song2Graph-style JSON manifests written for app runs and sweep runs
 - Support for multiple audio formats
 - Automatic audio format conversion
 - Efficient memory management
@@ -129,10 +153,18 @@ Main application interface featuring:
 ### MIDI Conversion
 - Multiple transcription backends
 - Basic Pitch
-- MT3
+- MR-MT3
+- MT3-PyTorch
+- YourMT3
 - Accurate note detection
 - Polyphonic transcription
 - Configurable Basic Pitch parameters for thresholding and note cleanup
+
+### Context Extraction
+- Optional tempo / key / section analysis
+- Optional lyrics transcription and section alignment
+- Retrieval-ready metadata embedded in every run manifest
+- Optional CLAP library indexing/search over generated manifests
 
 ### User Interface
 - Simple, intuitive design
@@ -156,11 +188,14 @@ pip install -r requirements-separation-backends.txt
 # Optional: enable the MT3 MIDI backend
 pip install -r requirements-amt-backends.txt
 
+# Optional: enable analysis / lyrics / CLAP retrieval
+pip install -r requirements-context-backends.txt
+
 # Run application
 python app.py
 ```
 
-The optional separator backend requirements enable the ZFTurbo-backed RoFormer, SCNet, and MDX23C integrations used alongside the Demucs family in the app and sweep scripts. The optional AMT backend requirements enable MT3 so the transcription side can be compared against Basic Pitch.
+The optional separator backend requirements enable the ZFTurbo-backed RoFormer, SCNet, and MDX23C integrations used alongside the Demucs family in the app and sweep scripts. The optional AMT backend requirements enable MR-MT3, MT3-PyTorch, and YourMT3 so the transcription side can be compared against Basic Pitch. The optional context backend requirements enable Song2Graph-style analysis, lyrics alignment, and CLAP-based library search.
 
 ### Compare Demucs Models
 ```bash
@@ -176,6 +211,11 @@ python scripts/run_separator_model_sweep.py path/to/audio.wav --models all
 
 This runs the full separator registry across Demucs plus the ZFTurbo-backed RoFormer / SCNet / MDX23C entries.
 
+To include tempo / key / section manifests and vocal lyrics when available:
+```bash
+python scripts/run_separator_model_sweep.py path/to/audio.wav --models all --analyze --transcribe-lyrics
+```
+
 ### Compare AMT Models
 ```bash
 python scripts/run_amt_model_sweep.py path/to/audio.wav --models all
@@ -183,12 +223,28 @@ python scripts/run_amt_model_sweep.py path/to/audio.wav --models all
 
 This compares the registered AMT backends directly without first running stem separation.
 
+The AMT registry currently includes `basic_pitch`, `mt3`, `mt3_pytorch`, and `yourmt3`.
+
 ### Compare Full Separation -> MIDI Pipeline
 ```bash
 python scripts/run_full_pipeline_sweep.py path/to/audio.wav --separator-models all --amt-models all --stems all
 ```
 
 This is the main end-to-end matrix run. It executes every registered separator model, transcribes every produced stem with every AMT backend, and writes a single `summary.json` plus model-specific outputs under `pipeline_sweeps/<audio-name>/`.
+
+To include optional analysis and lyrics manifests in the full matrix:
+```bash
+python scripts/run_full_pipeline_sweep.py path/to/audio.wav --separator-models all --amt-models all --stems all --analyze --transcribe-lyrics
+```
+
+### Build CLAP Library Search
+```bash
+python scripts/run_clap_library.py build path/to/run-output-root --output-prefix .tmp/clap/library
+python scripts/run_clap_library.py text --index-prefix .tmp/clap/library --query "solo piano melody"
+python scripts/run_clap_library.py similar --index-prefix .tmp/clap/library --item-id <item-id>
+```
+
+This indexes the audio artifacts referenced by run manifests, deduplicates them by audio path, and lets you search the resulting library by text or nearest-neighbor similarity.
 
 ### Lightning.ai Deployment
 1. Create new Lightning App
@@ -214,6 +270,8 @@ Implemented comprehensive error handling for:
 - Clean user interface
 - Download capabilities
 - Multi-format support
+- JSON manifest generation per run
+- Optional context extraction and retrieval metadata
 
 ## Limitations
 - Maximum file size: 30MB

@@ -31,6 +31,20 @@ AMT_MODELS: dict[str, AmtModelSpec] = {
         description="Heavier multi-instrument transcription via mt3-infer using the MR-MT3 checkpoint.",
         mt3_model_name="mr_mt3",
     ),
+    "mt3_pytorch": AmtModelSpec(
+        key="mt3_pytorch",
+        display_name="MT3 / Official PyTorch",
+        backend="mt3",
+        description="Official MT3 architecture via mt3-infer using the mt3_pytorch checkpoint.",
+        mt3_model_name="mt3_pytorch",
+    ),
+    "yourmt3": AmtModelSpec(
+        key="yourmt3",
+        display_name="MT3 / YourMT3",
+        backend="mt3",
+        description="Advanced multi-task MT3 variant via mt3-infer using the YourMT3 checkpoint.",
+        mt3_model_name="yourmt3",
+    ),
 }
 
 

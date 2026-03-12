@@ -20,6 +20,7 @@ RUNTIME_MPLCONFIG_DIR = RUNTIME_ROOT / "mplconfig"
 RUNTIME_TMP_DIR = RUNTIME_ROOT / "tmp"
 RUNTIME_TORCH_HOME = RUNTIME_CACHE_DIR / "torch"
 RUNTIME_HF_HOME = RUNTIME_CACHE_DIR / "huggingface"
+RUNTIME_MT3_CHECKPOINT_DIR = PROJECT_ROOT / ".mt3_checkpoints"
 
 for runtime_dir in (
     RUNTIME_ROOT,
@@ -28,6 +29,7 @@ for runtime_dir in (
     RUNTIME_TMP_DIR,
     RUNTIME_TORCH_HOME,
     RUNTIME_HF_HOME,
+    RUNTIME_MT3_CHECKPOINT_DIR,
 ):
     runtime_dir.mkdir(parents=True, exist_ok=True)
 
@@ -46,6 +48,7 @@ _configure_runtime_path("MPLCONFIGDIR", RUNTIME_MPLCONFIG_DIR)
 _configure_runtime_path("TMPDIR", RUNTIME_TMP_DIR)
 _configure_runtime_path("TORCH_HOME", RUNTIME_TORCH_HOME)
 _configure_runtime_path("HF_HOME", RUNTIME_HF_HOME)
+_configure_runtime_path("MT3_CHECKPOINT_DIR", RUNTIME_MT3_CHECKPOINT_DIR)
 tempfile.tempdir = str(RUNTIME_TMP_DIR)
 
 _MT3_COMPAT_PATCHED = False
@@ -146,7 +149,7 @@ class MT3AmtProcessor:
             from mt3_infer import transcribe
         except ImportError as exc:
             raise RuntimeError(
-                "MT3 MIDI export is not installed. Install it with "
+                f"{self.spec.display_name} is not installed. Install it with "
                 "`pip install -r requirements.txt -r requirements-amt-backends.txt`."
             ) from exc
         _apply_mt3_compat_patches()

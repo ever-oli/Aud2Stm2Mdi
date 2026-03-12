@@ -87,6 +87,13 @@ from amt_registry import (  # noqa: E402
     get_amt_model_spec,
     list_amt_dropdown_choices,
 )
+from context_pipeline import (  # noqa: E402
+    disabled_analysis,
+    disabled_lyrics,
+    run_optional_analysis,
+    run_optional_lyrics,
+)
+from run_manifest import build_run_manifest, write_run_manifest  # noqa: E402
 
 # ── Output directory ─────────────────────────────────────────────────────────
 OUTPUT_DIR = RUNTIME_ROOT
@@ -228,6 +235,8 @@ def process_audio(
     multiple_pitch_bends: bool,
     separator_model: str = DEFAULT_SEPARATOR_MODEL,
     amt_model: str = DEFAULT_AMT_MODEL,
+    analyze_audio_metadata: bool = False,
+    transcribe_lyrics: bool = False,
     progress=gr.Progress(track_tqdm=True),
 ):
     """
@@ -238,7 +247,7 @@ def process_audio(
         onset_threshold, frame_threshold, min_note_length,
         multiple_pitch_bends, separator_model, amt_model
 
-    Outputs  →  [stem_audio, midi_file, piano_roll]
+    Outputs  →  [stem_audio, midi_file, manifest_file, lyrics_json, piano_roll]
     """
     # ── Validate input ────────────────────────────────────────────────────
     if audio_file is None:
@@ -319,32 +328,141 @@ def process_audio(
             y = y.mean(axis=1)
         audio_out = (orig_sr, (y * 32767).astype(np.int16))
 
-        # ── Early exit if MIDI not requested ─────────────────────────────
-        if not convert_midi:
-            progress(1.0, desc="Done.")
-            return audio_out, None, gr.update(value=None, visible=False)
+        analysis_payload = disabled_analysis()
+        if analyze_audio_metadata:
+            progress(0.62, desc="Analyzing source and selected stem…")
+            source_analysis = run_optional_analysis(file_path, enabled=True)
+            target_analysis = run_optional_analysis(str(stem_path), enabled=True)
+            analysis_payload = {
+                "enabled": True,
+                "status": "ok",
+                "source_audio": source_analysis,
+                "target_audio": target_analysis,
+                "stems": [
+                    {
+                        "stem": stem_type,
+                        "analysis": target_analysis,
+                    }
+                ],
+            }
+            if any(
+                item.get("status") in {"error", "partial"}
+                for item in (source_analysis, target_analysis)
+                if isinstance(item, dict)
+            ):
+                analysis_payload["status"] = "partial"
+
+        lyrics_payload = disabled_lyrics()
+        lyrics_file_output = None
+        if transcribe_lyrics:
+            progress(0.66, desc="Transcribing lyrics…")
+            sections = []
+            target_analysis = analysis_payload.get("target_audio", {})
+            if isinstance(target_analysis, dict):
+                sections = target_analysis.get("sections") or []
+            lyrics_path = work_dir / f"{stem_type}_lyrics.json"
+            lyrics_result = run_optional_lyrics(
+                str(stem_path),
+                str(lyrics_path),
+                enabled=True,
+                sections=sections,
+            )
+            lyrics_payload = {
+                "enabled": True,
+                "stem": stem_type,
+                **lyrics_result,
+            }
+            if lyrics_result.get("status") == "ok":
+                lyrics_file_output = str(lyrics_path)
 
         # ── Stage 2: MIDI conversion ──────────────────────────────────────
-        amt_spec = get_amt_model_spec(amt_model)
-        progress(0.60, desc=f"Running {amt_spec.display_name}…")
-        amt_processor = get_amt_processor(amt_model)
+        midi_output = None
+        piano_roll_output = gr.update(value=None, visible=False)
+        transcription_payload = {
+            "status": "not_requested",
+        }
+        if convert_midi:
+            amt_spec = get_amt_model_spec(amt_model)
+            progress(0.76, desc=f"Running {amt_spec.display_name}…")
+            amt_processor = get_amt_processor(amt_model)
 
-        midi_path = work_dir / f"{stem_type}_{amt_model}.mid"
-        amt_processor.convert_to_midi(
-            str(stem_path),
-            str(midi_path),
-            onset_threshold=onset_threshold,
-            frame_threshold=frame_threshold,
-            minimum_note_length=min_note_length,
-            multiple_pitch_bends=multiple_pitch_bends,
+            midi_path = work_dir / f"{stem_type}_{amt_model}.mid"
+            amt_processor.convert_to_midi(
+                str(stem_path),
+                str(midi_path),
+                onset_threshold=onset_threshold,
+                frame_threshold=frame_threshold,
+                minimum_note_length=min_note_length,
+                multiple_pitch_bends=multiple_pitch_bends,
+            )
+
+            progress(0.90, desc="Rendering piano roll…")
+            roll_img = render_piano_roll(str(midi_path))
+            piano_roll_output = gr.update(value=roll_img, visible=True)
+            midi_output = str(midi_path)
+            transcription_payload = {
+                "status": "ok",
+                "model": amt_model,
+                "display_name": amt_spec.display_name,
+                "backend": amt_spec.backend,
+                "midi_path": str(midi_path),
+            }
+
+        manifest_path = work_dir / "run_manifest.json"
+        stem_entries = [
+            {
+                "stem": stem_name,
+                "path": str(stem_path_value),
+            }
+            for stem_name, stem_path_value in sorted(stem_paths.items())
+        ]
+        manifest_status = "ok"
+        if analysis_payload.get("status") in {"error", "partial"} or lyrics_payload.get("status") in {"error", "partial"}:
+            manifest_status = "partial"
+
+        manifest = build_run_manifest(
+            run_type="app",
+            source_audio_path=file_path,
+            status=manifest_status,
+            config={
+                "separator_model": separator_model,
+                "separator_display_name": spec.display_name,
+                "stem": stem_type,
+                "convert_midi": convert_midi,
+                "amt_model": amt_model if convert_midi else None,
+                "onset_threshold": onset_threshold,
+                "frame_threshold": frame_threshold,
+                "minimum_note_length": min_note_length,
+                "multiple_pitch_bends": multiple_pitch_bends,
+                "target_bpm": target_bpm,
+                "analyze_audio_metadata": analyze_audio_metadata,
+                "transcribe_lyrics": transcribe_lyrics,
+            },
+            separator={
+                "status": "ok",
+                "model": separator_model,
+                "display_name": spec.display_name,
+                "backend": spec.backend,
+                "sources": list(processor.sources),
+                "output_dir": str(work_dir),
+            },
+            transcription=transcription_payload,
+            analysis=analysis_payload,
+            lyrics=lyrics_payload,
+            references={
+                "source_audio": file_path,
+                "stem_directory": str(work_dir),
+                "selected_stem": stem_type,
+                "stems": stem_entries,
+                "midi": ([{"kind": "midi", "path": midi_output}] if midi_output else []),
+                "lyrics": ([{"kind": "lyrics", "path": lyrics_file_output}] if lyrics_file_output else []),
+                "manifests": [{"kind": "run_manifest", "path": str(manifest_path)}],
+            },
         )
-
-        # ── Stage 3: piano roll render ────────────────────────────────────
-        progress(0.90, desc="Rendering piano roll…")
-        roll_img = render_piano_roll(str(midi_path))
+        manifest_output = write_run_manifest(manifest_path, manifest)
 
         progress(1.0, desc="Done.")
-        return audio_out, str(midi_path), gr.update(value=roll_img, visible=True)
+        return audio_out, midi_output, manifest_output, lyrics_file_output, piano_roll_output
 
     except gr.Error:
         raise
@@ -365,6 +483,8 @@ def process_audio_path(
     multiple_pitch_bends: bool,
     separator_model: str = DEFAULT_SEPARATOR_MODEL,
     amt_model: str = DEFAULT_AMT_MODEL,
+    analyze_audio_metadata: bool = False,
+    transcribe_lyrics: bool = False,
     progress=gr.Progress(track_tqdm=True),
 ):
     """Same as process_audio but accepts a plain file-system path string."""
@@ -379,6 +499,8 @@ def process_audio_path(
         onset_threshold, frame_threshold, min_note_length, multiple_pitch_bends,
         separator_model,
         amt_model,
+        analyze_audio_metadata,
+        transcribe_lyrics,
         progress,
     )
 
@@ -410,7 +532,8 @@ def build_interface() -> gr.Blocks:
             "## Aud2Stm2Mdi\n"
             "Separate audio into stems with **Demucs** plus experimental "
             "**RoFormer / SCNet / MDX23C** backends, "
-            "then transcribe to **MIDI** with **Basic Pitch** or **MT3**."
+            "then transcribe to **MIDI** with **Basic Pitch** or multiple **MT3-family** backends. "
+            "Each run can also emit a JSON manifest, optional audio analysis, and optional lyrics alignment."
         )
 
         with gr.Row():
@@ -438,9 +561,21 @@ def build_interface() -> gr.Blocks:
                     choices=amt_model_choices,
                     value=DEFAULT_AMT_MODEL,
                     label="MIDI transcription model",
-                    info="Basic Pitch is lightweight. MT3 is heavier but better suited to multi-instrument transcription.",
+                    info="Basic Pitch is lightweight. MR-MT3, MT3-PyTorch, and YourMT3 are heavier but better suited to multi-instrument transcription.",
                 )
                 amt_help = gr.Markdown(default_amt_help)
+
+                with gr.Accordion("Optional Context Extraction", open=False):
+                    analysis_cb = gr.Checkbox(
+                        label="Analyze tempo / key / sections",
+                        value=False,
+                        info="Runs optional Song2Graph-style audio analysis on the source mix and selected stem.",
+                    )
+                    lyrics_cb = gr.Checkbox(
+                        label="Transcribe lyrics (best on vocals)",
+                        value=False,
+                        info="Uses faster-whisper and aligns lines to detected sections when analysis is enabled.",
+                    )
 
                 with gr.Accordion("BPM Quantization (Polymath Core)", open=False):
                     bpm_sl = gr.Slider(
@@ -490,6 +625,8 @@ def build_interface() -> gr.Blocks:
             with gr.Column(scale=2):
                 stem_audio = gr.Audio(label="Separated Stem", type="numpy")
                 midi_file  = gr.File(label="MIDI Download")
+                manifest_file = gr.File(label="Run Manifest")
+                lyrics_file = gr.File(label="Lyrics JSON")
                 piano_roll = gr.Image(
                     label="Piano Roll Preview",
                     type="numpy",
@@ -503,8 +640,10 @@ def build_interface() -> gr.Blocks:
                 onset_sl, frame_sl, minlen_sl, bends_cb,
                 model_dd,
                 amt_model_dd,
+                analysis_cb,
+                lyrics_cb,
             ],
-            outputs=[stem_audio, midi_file, piano_roll],
+            outputs=[stem_audio, midi_file, manifest_file, lyrics_file, piano_roll],
         )
 
         test_btn.click(
@@ -514,8 +653,10 @@ def build_interface() -> gr.Blocks:
                 onset_sl, frame_sl, minlen_sl, bends_cb,
                 model_dd,
                 amt_model_dd,
+                analysis_cb,
+                lyrics_cb,
             ],
-            outputs=[stem_audio, midi_file, piano_roll],
+            outputs=[stem_audio, midi_file, manifest_file, lyrics_file, piano_roll],
         )
 
         model_dd.change(

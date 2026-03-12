@@ -13,6 +13,11 @@ basic-pitch @ git+https://github.com/spotify/basic-pitch.git
 # requirements-amt-backends.txt
 # Install them with:
 # pip install -r requirements.txt -r requirements-amt-backends.txt
+#
+# Optional analysis / lyrics / retrieval backends live in:
+# requirements-context-backends.txt
+# Install them with:
+# pip install -r requirements.txt -r requirements-context-backends.txt
 
 # Gradio UI
 gradio>=4.0.0

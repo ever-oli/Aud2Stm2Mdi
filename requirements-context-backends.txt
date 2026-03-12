@@ -1,0 +1,17 @@
+# Optional Song2Graph-style context extraction backends.
+#
+# Install this alongside the base requirements when you want:
+# - tempo / key / section analysis
+# - lyrics transcription + alignment
+# - CLAP retrieval indexing/search
+
+# Audio analysis
+sf_segmenter==0.0.2
+torchcrepe==0.0.24
+
+# Lyrics transcription
+faster-whisper>=1.1.0
+
+# Retrieval
+laion-clap
+torchvision>=0.15.0

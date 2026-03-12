@@ -1,4 +1,5 @@
 import os
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -95,11 +96,13 @@ class AppProcessAudioTests(unittest.TestCase):
     def test_amt_help_text_reflects_selected_model(self):
         basic_pitch_help = app.get_amt_model_help_text("basic_pitch")
         mt3_help = app.get_amt_model_help_text("mt3")
+        yourmt3_help = app.get_amt_model_help_text("yourmt3")
 
         self.assertIn("Basic Pitch", basic_pitch_help)
         self.assertIn("sliders below are active", basic_pitch_help)
         self.assertIn("MT3", mt3_help)
         self.assertIn("ignored", mt3_help)
+        self.assertIn("YourMT3", yourmt3_help)
 
     def test_process_audio_without_midi_returns_audio_and_hides_roll(self):
         fake_processor = _FakeProcessor()
@@ -110,7 +113,7 @@ class AppProcessAudioTests(unittest.TestCase):
             with patch.object(app, "OUTPUT_DIR", Path(tmpdir)), patch.object(
                 app, "get_processor", return_value=fake_processor
             ) as get_processor:
-                audio_out, midi_path, piano_roll = app.process_audio_path(
+                audio_out, midi_path, manifest_path, lyrics_path, piano_roll = app.process_audio_path(
                     sample_path,
                     stem_type="other",
                     target_bpm=0,
@@ -122,6 +125,7 @@ class AppProcessAudioTests(unittest.TestCase):
                     separator_model="mdx",
                     progress=progress,
                 )
+                manifest_exists = Path(manifest_path).is_file()
 
         get_processor.assert_called_once_with("mdx")
 
@@ -129,6 +133,8 @@ class AppProcessAudioTests(unittest.TestCase):
         self.assertEqual(sample_rate, 44100)
         self.assertEqual(samples.dtype, np.int16)
         self.assertIsNone(midi_path)
+        self.assertTrue(manifest_exists)
+        self.assertIsNone(lyrics_path)
         self.assertFalse(piano_roll["visible"])
         self.assertEqual(progress.events[-1][0], 1.0)
 
@@ -172,7 +178,7 @@ class AppProcessAudioTests(unittest.TestCase):
             ), patch.object(
                 app, "render_piano_roll", return_value=expected_roll
             ):
-                audio_out, midi_path, piano_roll = app.process_audio_path(
+                audio_out, midi_path, manifest_path, lyrics_path, piano_roll = app.process_audio_path(
                     sample_path,
                     stem_type="other",
                     target_bpm=0,
@@ -185,6 +191,7 @@ class AppProcessAudioTests(unittest.TestCase):
                     amt_model="basic_pitch",
                     progress=progress,
                 )
+                manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
 
         sample_rate, samples = audio_out
         self.assertEqual(sample_rate, 44100)
@@ -199,6 +206,9 @@ class AppProcessAudioTests(unittest.TestCase):
         self.assertTrue(amt_kwargs["multiple_pitch_bends"])
         self.assertTrue(piano_roll["visible"])
         self.assertTrue(np.array_equal(piano_roll["value"], expected_roll))
+        self.assertEqual(manifest["transcription"]["model"], "basic_pitch")
+        self.assertEqual(manifest["config"]["separator_model"], "htdemucs_ft")
+        self.assertIsNone(lyrics_path)
         self.assertEqual(progress.events[-1][0], 1.0)
 
     def test_process_audio_with_mt3_uses_selected_amt_model(self):
@@ -216,7 +226,7 @@ class AppProcessAudioTests(unittest.TestCase):
             ) as get_amt_processor, patch.object(
                 app, "render_piano_roll", return_value=expected_roll
             ):
-                _, midi_path, piano_roll = app.process_audio_path(
+                _, midi_path, manifest_path, _, piano_roll = app.process_audio_path(
                     sample_path,
                     stem_type="vocals",
                     target_bpm=0,
@@ -226,14 +236,80 @@ class AppProcessAudioTests(unittest.TestCase):
                     min_note_length=150,
                     multiple_pitch_bends=False,
                     separator_model="mdx",
-                    amt_model="mt3",
+                    amt_model="yourmt3",
                     progress=progress,
                 )
+                manifest_exists = Path(manifest_path).is_file()
 
-        get_amt_processor.assert_called_once_with("mt3")
-        self.assertTrue(midi_path.endswith("_mt3.mid"))
+        get_amt_processor.assert_called_once_with("yourmt3")
+        self.assertTrue(midi_path.endswith("_yourmt3.mid"))
+        self.assertTrue(manifest_exists)
         self.assertTrue(fake_amt_processor.calls)
         self.assertTrue(piano_roll["visible"])
+
+    def test_process_audio_with_analysis_and_lyrics_writes_optional_artifacts(self):
+        fake_processor = _FakeProcessor()
+        fake_amt_processor = _FakeAmtProcessor()
+        progress = _ProgressRecorder()
+        expected_roll = np.zeros((8, 16, 3), dtype=np.uint8)
+        fake_analysis = {
+            "status": "ok",
+            "tempo": 120.0,
+            "key": "A4",
+            "sections": [
+                {"index": 0, "label": "A", "start": 0.0, "end": 1.0},
+            ],
+            "structure_labels": ["section_a"],
+            "mood_tags": ["midtempo"],
+        }
+
+        def _fake_lyrics(audio_path, output_path, **kwargs):
+            del audio_path, kwargs
+            Path(output_path).write_text("{}", encoding="utf-8")
+            return {
+                "status": "ok",
+                "output_path": str(output_path),
+                "normalized_excerpt": "hello world",
+                "aligned_sections": [{"index": 0, "text": "hello world"}],
+            }
+
+        with TemporaryDirectory() as tmpdir:
+            sample_path = _write_sample_wav(tmpdir)
+            with patch.object(app, "OUTPUT_DIR", Path(tmpdir)), patch.object(
+                app, "get_processor", return_value=fake_processor
+            ), patch.object(
+                app, "get_amt_processor", return_value=fake_amt_processor
+            ), patch.object(
+                app, "render_piano_roll", return_value=expected_roll
+            ), patch.object(
+                app, "run_optional_analysis", return_value=fake_analysis
+            ) as analysis_mock, patch.object(
+                app, "run_optional_lyrics", side_effect=_fake_lyrics
+            ) as lyrics_mock:
+                _, _, manifest_path, lyrics_path, _ = app.process_audio_path(
+                    sample_path,
+                    stem_type="vocals",
+                    target_bpm=0,
+                    convert_midi=True,
+                    onset_threshold=0.5,
+                    frame_threshold=0.4,
+                    min_note_length=150,
+                    multiple_pitch_bends=False,
+                    separator_model="mdx",
+                    amt_model="mt3_pytorch",
+                    analyze_audio_metadata=True,
+                    transcribe_lyrics=True,
+                    progress=progress,
+                )
+                lyrics_exists = Path(lyrics_path).is_file()
+                manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+
+        self.assertEqual(analysis_mock.call_count, 2)
+        lyrics_mock.assert_called_once()
+        self.assertTrue(lyrics_exists)
+        self.assertTrue(manifest["analysis"]["enabled"])
+        self.assertEqual(manifest["lyrics"]["status"], "ok")
+        self.assertEqual(manifest["config"]["amt_model"], "mt3_pytorch")
 
 
 if __name__ == "__main__":
